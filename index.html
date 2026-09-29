@@ -85,11 +85,6 @@ input{font:inherit;color:inherit}
 .stamp{position:absolute;top:22px;padding:6px 12px;border:3px solid;border-radius:10px;font-weight:800;font-size:22px;letter-spacing:.06em;opacity:0;background:rgba(0,0,0,.25)}
 .stamp.keep{left:18px;color:var(--keep);transform:rotate(-12deg);opacity:var(--k,0)}
 .stamp.toss{right:18px;color:var(--toss);transform:rotate(12deg);opacity:var(--t,0)}
-.snipbar{position:absolute;left:0;right:0;bottom:0;height:4px;background:rgba(255,255,255,.12);opacity:0;transition:opacity .2s}
-.snipbar i{display:block;height:100%;width:0;background:var(--accent)}
-.snipbar.run{opacity:1}
-.snipbar.run i{animation:fill var(--d,20s) linear forwards}
-@keyframes fill{to{width:100%}}
 .playing-dot{position:absolute;right:14px;bottom:14px;display:none;gap:3px;align-items:flex-end;height:18px;padding:6px 8px;border-radius:10px;background:rgba(0,0,0,.45)}
 .playing .playing-dot{display:flex}
 .playing-dot b{width:3px;background:#fff;border-radius:2px;animation:eq .9s ease-in-out infinite}
@@ -101,11 +96,17 @@ input{font:inherit;color:inherit}
 .sub{margin-top:4px;font-size:13px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
 /* Controls */
-.playrow{display:flex;gap:8px;padding:4px 16px 10px}
-.pbtn{flex:1;display:flex;align-items:center;justify-content:center;gap:8px;padding:11px 8px;border-radius:14px;background:var(--panel);border:1px solid var(--line);font-size:14px;font-weight:600}
-.pbtn svg{width:16px;height:16px}
-.pbtn.on{border-color:var(--accent);color:var(--accent);background:rgba(179,146,255,.1)}
-.pbtn.stop{flex:0 0 48px}
+.scrub{display:flex;align-items:center;gap:12px;padding:2px 16px 10px}
+.pp{flex:none;width:46px;height:46px;border-radius:50%;display:grid;place-items:center;background:var(--accent);color:#140d24}
+.pp:active{transform:scale(.93)}
+.pp svg{width:20px;height:20px}
+.scrub-main{flex:1;min-width:0}
+.seek{-webkit-appearance:none;appearance:none;width:100%;height:28px;background:transparent;margin:0;touch-action:none;--p:0%}
+.seek::-webkit-slider-runnable-track{height:5px;border-radius:3px;background:linear-gradient(to right,var(--accent) var(--p),var(--panel2) var(--p))}
+.seek::-moz-range-track{height:5px;border-radius:3px;background:linear-gradient(to right,var(--accent) var(--p),var(--panel2) var(--p))}
+.seek::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;background:#fff;margin-top:-6.5px;box-shadow:0 1px 4px rgba(0,0,0,.4)}
+.seek::-moz-range-thumb{width:18px;height:18px;border:0;border-radius:50%;background:#fff}
+.times{display:flex;justify-content:space-between;font-size:12px;color:var(--dim);font-variant-numeric:tabular-nums;margin-top:-2px}
 .controls{display:flex;align-items:center;justify-content:center;gap:22px;padding:2px 16px 14px}
 .cbtn{border-radius:50%;display:grid;place-items:center;background:var(--panel);border:1px solid var(--line)}
 .cbtn:active{transform:scale(.92)}
@@ -134,6 +135,10 @@ input{font:inherit;color:inherit}
 .toggle input{width:20px;height:20px;accent-color:var(--accent)}
 .sheet .search{margin:0 18px 6px;width:auto;padding:10px 14px}
 .sheet-list{overflow:auto;padding:4px 10px;flex:1;min-height:120px}
+.thumb.plus{background:rgba(179,146,255,.15);color:var(--accent);font-size:30px;font-weight:300;line-height:1}
+.newform{display:flex;gap:8px;padding:2px 8px 10px}
+.newform[hidden]{display:none}
+.newform .search{margin:0;flex:1;width:auto}
 .sheet-foot{padding:10px 18px 12px;display:flex;flex-direction:column;gap:6px;border-top:1px solid var(--line)}
 .setting{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid var(--line)}
 .setting label{flex:1}
@@ -274,7 +279,7 @@ async function pageAll(path){
 
 /* ============ State ============ */
 const S = { me:null, liked:null, playlists:[], current:null, tracks:[], queue:[], idx:0, history:[], stats:{}, busy:false,
-            deviceId:null, playing:null, playTok:0, snipTimer:null };
+            deviceId:null, playing:null, playTok:0, snipTimer:null, cursor:0, cursorUri:null, seeking:false };
 const cur = () => S.queue[S.idx];
 
 async function loadPlaylists(){
@@ -329,12 +334,25 @@ async function findDevice(){
 function noDevice(){
   toast('Kein Spotify-Gerät gefunden. Öffne kurz Spotify, starte irgendeinen Song und komm zurück.', { action:{ label:'Spotify öffnen', href:'spotify:' }, ms:6000 });
 }
-async function play(t, mode){
+const devQ = () => S.deviceId ? 'device_id=' + encodeURIComponent(S.deviceId) : '';
+const startPos = t => Math.floor(t.dur * settings().start / 100);
+const isPlayingCur = () => !!(S.playing && cur() && S.playing.uri === cur().uri);
+function curPos(){
+  const t = cur(); if(!t) return 0;
+  if(isPlayingCur()) return Math.min(t.dur, S.playing.pos + (Date.now() - S.playing.at));
+  return S.cursorUri === t.uri ? S.cursor : startPos(t);
+}
+function armStop(tok){
+  clearTimeout(S.snipTimer);
+  const len = settings().len;
+  if(len > 0) S.snipTimer = setTimeout(() => { if(tok === S.playTok) pause(); }, len * 1000);
+}
+async function play(t, position_ms, snippet = false){
   const tok = ++S.playTok;
   clearTimeout(S.snipTimer);
-  const st = settings();
-  const position_ms = mode === 'full' ? 0 : Math.floor(t.dur * st.start / 100);
-  const send = () => api('PUT', '/me/player/play' + (S.deviceId ? '?device_id=' + encodeURIComponent(S.deviceId) : ''), { uris:[t.uri], position_ms });
+  position_ms = Math.max(0, Math.min(t.dur - 1000, Math.floor(position_ms)));
+  S.cursor = position_ms; S.cursorUri = t.uri;
+  const send = () => api('PUT', '/me/player/play' + (S.deviceId ? '?' + devQ() : ''), { uris:[t.uri], position_ms });
   try{
     if(!S.deviceId && !(await findDevice())) return noDevice();
     try{ await send(); }
@@ -350,32 +368,56 @@ async function play(t, mode){
     return toast(e.message);
   }
   if(tok !== S.playTok) return;
-  S.playing = { uri:t.uri, mode };
+  S.playing = { uri:t.uri, pos:position_ms, at:Date.now() };
   updatePlayUI();
-  if(mode === 'snip') S.snipTimer = setTimeout(() => { if(tok === S.playTok) pause(); }, st.len * 1000);
+  if(snippet) armStop(tok);
 }
 async function pause(){
   S.playTok++; clearTimeout(S.snipTimer);
-  const was = S.playing; S.playing = null; updatePlayUI();
+  const was = S.playing;
+  if(was && cur() && was.uri === cur().uri){ S.cursor = curPos(); S.cursorUri = was.uri; }
+  S.playing = null; updatePlayUI();
   if(!was) return;
-  try{ await api('PUT', '/me/player/pause' + (S.deviceId ? '?device_id=' + encodeURIComponent(S.deviceId) : '')); }catch{}
+  try{ await api('PUT', '/me/player/pause' + (S.deviceId ? '?' + devQ() : '')); }catch{}
 }
-function toggle(mode){
+function togglePlay(){
   const t = cur(); if(!t) return;
-  if(S.playing && S.playing.uri === t.uri && S.playing.mode === mode) pause(); else play(t, mode);
+  if(isPlayingCur()) pause(); else play(t, curPos());
+}
+async function seekTo(ms){
+  const t = cur(); if(!t) return;
+  ms = Math.max(0, Math.min(t.dur - 1000, Math.floor(ms)));
+  if(!isPlayingCur()) return play(t, ms);
+  S.playing.pos = ms; S.playing.at = Date.now();
+  S.cursor = ms; S.cursorUri = t.uri;
+  clearTimeout(S.snipTimer);
+  updatePlayUI();
+  try{ await api('PUT', '/me/player/seek?position_ms=' + ms + (S.deviceId ? '&' + devQ() : '')); }
+  catch(e){ handleErr(e); }
 }
 function updatePlayUI(){
-  const t = cur();
-  const on = S.playing && t && S.playing.uri === t.uri ? S.playing.mode : null;
-  $('#snip')?.classList.toggle('on', on === 'snip');
-  $('#full')?.classList.toggle('on', on === 'full');
-  const card = $('.card.top'); if(!card) return;
-  card.classList.toggle('playing', !!on);
-  const bar = card.querySelector('.snipbar');
-  bar.classList.remove('run');
-  if(on === 'snip'){ bar.style.setProperty('--d', settings().len + 's'); void bar.offsetWidth; bar.classList.add('run'); }
+  const t = cur(), on = isPlayingCur();
+  const pp = $('#pp');
+  if(pp){ pp.innerHTML = on ? I.pause : I.play; pp.setAttribute('aria-label', on ? 'Pause' : 'Abspielen'); }
+  $('.card.top')?.classList.toggle('playing', on);
+  if(!t || S.seeking) return;
+  const seek = $('#seek'); if(!seek) return;
+  const pos = curPos();
+  if(on && pos >= t.dur - 500){ S.playing = null; S.cursor = 0; S.cursorUri = t.uri; }
+  seek.value = pos;
+  paintSeek(pos, t.dur);
 }
-function autoplay(){ const t = cur(); if(t && settings().auto) play(t, 'snip'); else if(S.playing) pause(); }
+function paintSeek(pos, dur){
+  const seek = $('#seek'); if(!seek) return;
+  seek.style.setProperty('--p', (dur ? pos / dur * 100 : 0) + '%');
+  const c = $('#tcur'); if(c) c.textContent = fmt(pos);
+}
+setInterval(() => { if(S.playing) updatePlayUI(); }, 250);
+function autoplay(){
+  const t = cur();
+  if(t && settings().auto) play(t, startPos(t), true);
+  else if(S.playing) pause();
+}
 
 /* ============ Views ============ */
 function handleErr(e){
@@ -447,6 +489,7 @@ async function startSort(id){
   const rev = new Set(LS.get(revKey(), []));
   const seen = new Set();
   S.queue = S.tracks.filter(t => !rev.has(t.uri) && !seen.has(t.uri) && seen.add(t.uri));
+  for(let i = S.queue.length - 1; i > 0; i--){ const j = Math.floor(Math.random() * (i + 1)); [S.queue[i], S.queue[j]] = [S.queue[j], S.queue[i]]; }
   renderSwipe();
   autoplay();
 }
@@ -456,7 +499,6 @@ function cardHTML(t, cls){
     <div class="cover">${t.img ? `<img src="${esc(t.img)}" alt="" draggable="false">` : `<div class="noimg">${I.note}</div>`}
       <div class="stamp keep">BEHALTEN</div><div class="stamp toss">WEG</div>
       <div class="playing-dot"><b></b><b></b><b></b></div>
-      <div class="snipbar"><i></i></div>
     </div>
     <div class="meta"><div class="title">${esc(t.name)}</div><div class="artist">${esc(t.artists)}</div>
       <div class="sub">${esc(t.album)}${t.year ? ' · ' + esc(t.year) : ''} · ${fmt(t.dur)}</div></div>
@@ -469,10 +511,12 @@ function renderSwipe(){
       <div class="bar-title">${esc(pl.name)}</div><div class="count">${t ? S.idx + 1 : total}/${total}</div></header>
     <div class="progress"><i style="width:${total ? S.idx / total * 100 : 100}%"></i></div>
     <main class="stage">${t ? (n ? cardHTML(n, 'under') : '') + cardHTML(t, 'top') : doneHTML()}</main>
-    ${t ? `<div class="playrow">
-        <button class="pbtn" id="snip">${I.play} Ausschnitt</button>
-        <button class="pbtn" id="full">${I.full} Ganzer Song</button>
-        <button class="pbtn stop" id="stop" aria-label="Pause">${I.pause}</button></div>
+    ${t ? `<div class="scrub">
+        <button class="pp" id="pp" aria-label="Abspielen">${I.play}</button>
+        <div class="scrub-main">
+          <input class="seek" id="seek" type="range" min="0" max="${t.dur}" step="1000" value="${curPos()}" aria-label="Position im Song">
+          <div class="times"><span id="tcur">${fmt(curPos())}</span><span>${fmt(t.dur)}</span></div>
+        </div></div>
       <div class="controls">
         <button class="cbtn s" id="undo" aria-label="Rückgängig" ${S.history.length ? '' : 'disabled'}>${I.undo}</button>
         <button class="cbtn b toss" id="toss" aria-label="Weg">${I.x}</button>
@@ -481,9 +525,10 @@ function renderSwipe(){
   $('#back').onclick = showPlaylists;
   if(t){
     bindSwipe($('.card.top'));
-    $('#snip').onclick = () => toggle('snip');
-    $('#full').onclick = () => toggle('full');
-    $('#stop').onclick = pause;
+    $('#pp').onclick = togglePlay;
+    const seek = $('#seek');
+    seek.oninput = () => { S.seeking = true; paintSeek(+seek.value, t.dur); };
+    seek.onchange = () => { S.seeking = false; seekTo(+seek.value); };
     $('#undo').onclick = undo;
     $('#toss').onclick = () => fly(-1);
     $('#keep').onclick = () => fly(1);
@@ -528,7 +573,7 @@ function bindSwipe(el){
     if(!drag) return; drag = false;
     const dt = performance.now() - t0, v = Math.abs(dx) / Math.max(dt, 1);
     el.style.transition = '';
-    if(Math.abs(dx) < 6 && Math.abs(dy) < 6 && dt < 300){ el.style.transform = ''; return toggle('snip'); }
+    if(Math.abs(dx) < 6 && Math.abs(dy) < 6 && dt < 300){ el.style.transform = ''; return togglePlay(); }
     if(dx > 110 || (dx > 40 && v > 0.6)) return fly(1);
     if(dx < -110 || (dx < -40 && v > 0.6)) return fly(-1);
     el.style.transform = ''; hint(0);
@@ -558,7 +603,7 @@ function doKeep(){
 
 async function act(fn, msg){
   S.busy = true;
-  try{ await fn(); S.busy = false; toast(msg); next(); }
+  try{ await fn(); S.busy = false; toast(typeof msg === 'function' ? msg() : msg); next(); }
   catch(e){ S.busy = false; handleErr(e); renderSwipe(); }
 }
 
@@ -569,8 +614,13 @@ function doRemove(t){
   }, `Aus „${S.current.name}“ entfernt`);
 }
 
-function doMove(t, target, keepHere){
+function doMove(t, target, keepHere, newName){
   return act(async () => {
+    if(!target){
+      const p = await api('POST', '/me/playlists', { name:newName, public:false, description:'Erstellt mit Swipelist' });
+      target = { id:p.id, name:p.name || newName, img:null, total:0 };
+      S.playlists.unshift(target);
+    }
     await addTo(target, t.uri);
     if(keepHere) markReviewed(t);
     else{
@@ -579,7 +629,7 @@ function doMove(t, target, keepHere){
       t.removed = true;
     }
     S.history.push({ type:'move', t, target, keepHere }); S.stats.move++;
-  }, (keepHere ? '+ ' : '→ ') + target.name);
+  }, () => (keepHere ? '+ ' : '→ ') + (target ? target.name : newName));
 }
 
 async function undo(){
@@ -617,7 +667,13 @@ function openSheet(){
     <div class="sheet-head"><div class="sh-title">Wohin mit „${esc(t.name)}“?</div>
       <label class="toggle"><input type="checkbox" id="keephere"><span>Auch in „${esc(S.current.name)}“ lassen (kopieren statt verschieben)</span></label></div>
     <input class="search" id="q" placeholder="Playlist suchen …" autocomplete="off">
-    <div class="sheet-list" id="tl">${targets.map(p => `<button class="row" data-id="${esc(p.id)}">${thumb(p)}
+    <div class="sheet-list" id="tl">
+      <button class="row" id="newpl"><div class="thumb plus">+</div>
+        <div class="row-main"><div class="row-title">Neue Playlist erstellen</div><div class="row-sub">Song landet direkt drin</div></div></button>
+      <div class="newform" id="newform" hidden>
+        <input class="search" id="plname" placeholder="Name der neuen Playlist" autocomplete="off" maxlength="100">
+        <button class="btn primary sm" id="plok">Erstellen</button></div>
+      ${targets.map(p => `<button class="row" data-id="${esc(p.id)}">${thumb(p)}
       <div class="row-main"><div class="row-title">${esc(p.name)}</div><div class="row-sub">${p.total} Songs</div></div></button>`).join('')}</div>
     <div class="sheet-foot">
       <button class="btn danger wide" id="rm">Komplett aus „${esc(S.current.name)}“ entfernen</button>
@@ -625,9 +681,18 @@ function openSheet(){
   const cancel = () => { close(); renderSwipe(); };
   ov.addEventListener('click', e => { if(e.target === ov) cancel(); });
   q('#cancel').onclick = cancel;
-  q('#q').oninput = e => { const s = e.target.value.toLowerCase(); ov.querySelectorAll('#tl .row').forEach(r => r.style.display = r.textContent.toLowerCase().includes(s) ? '' : 'none'); };
+  q('#q').oninput = e => { const s = e.target.value.toLowerCase(); ov.querySelectorAll('#tl .row[data-id]').forEach(r => r.style.display = r.textContent.toLowerCase().includes(s) ? '' : 'none'); };
+  const createNew = () => {
+    const name = q('#plname').value.trim();
+    if(!name) return toast('Gib der Playlist einen Namen.');
+    const keepHere = q('#keephere').checked;
+    close(); doMove(t, null, keepHere, name);
+  };
+  q('#plok').onclick = createNew;
+  q('#plname').onkeydown = e => { if(e.key === 'Enter'){ e.preventDefault(); createNew(); } };
   q('#tl').onclick = e => {
-    const r = e.target.closest('.row'); if(!r) return;
+    if(e.target.closest('#newpl')){ q('#newform').hidden = false; q('#plname').focus(); return; }
+    const r = e.target.closest('.row[data-id]'); if(!r) return;
     const keepHere = q('#keephere').checked;
     close(); doMove(t, targets.find(p => p.id === r.dataset.id), keepHere);
   };
@@ -640,8 +705,8 @@ function showSettings(){
     <div class="sheet-head"><div class="sh-title">Einstellungen</div>
       <div class="setting-col"><div class="top"><span>Ausschnitt startet bei</span><span class="val" id="vs">${st.start} %</span></div>
         <input type="range" id="start" min="0" max="80" step="5" value="${st.start}"></div>
-      <div class="setting-col"><div class="top"><span>Ausschnitt-Länge</span><span class="val" id="vl">${st.len} s</span></div>
-        <input type="range" id="len" min="5" max="60" step="5" value="${st.len}"></div>
+      <div class="setting-col"><div class="top"><span>Ausschnitt-Länge</span><span class="val" id="vl">${st.len ? st.len + ' s' : 'ganzer Song'}</span></div>
+        <input type="range" id="len" min="0" max="60" step="5" value="${st.len}"></div>
       <div class="setting"><label for="auto">Ausschnitt automatisch abspielen</label><input type="checkbox" id="auto" ${st.auto ? 'checked' : ''} style="width:22px;height:22px;accent-color:var(--accent)"></div>
     </div>
     <div class="sheet-foot">
@@ -650,7 +715,7 @@ function showSettings(){
       <button class="btn ghost wide" id="ok">Fertig</button></div>`);
   const save = () => LS.set('settings', { start:+q('#start').value, len:+q('#len').value, auto:q('#auto').checked });
   q('#start').oninput = e => { q('#vs').textContent = e.target.value + ' %'; save(); };
-  q('#len').oninput = e => { q('#vl').textContent = e.target.value + ' s'; save(); };
+  q('#len').oninput = e => { q('#vl').textContent = +e.target.value ? e.target.value + ' s' : 'ganzer Song'; save(); };
   q('#auto').onchange = save;
   q('#ok').onclick = close;
   q('#reset').onclick = () => {
@@ -665,19 +730,21 @@ document.addEventListener('keydown', e => {
   if(document.querySelector('.overlay') || !$('.card.top')) return;
   if(e.key === 'ArrowRight') fly(1);
   else if(e.key === 'ArrowLeft') fly(-1);
-  else if(e.key === ' '){ e.preventDefault(); toggle('snip'); }
-  else if(e.key === 'f') toggle('full');
+  else if(e.key === ' '){ e.preventDefault(); togglePlay(); }
+  else if(e.key === '.') seekTo(curPos() + 10000);
+  else if(e.key === ',') seekTo(curPos() - 10000);
   else if(e.key === 'z' || e.key === 'Backspace') undo();
 });
 
 /* ============ Demo-Modus (?demo) zum Ausprobieren ohne Spotify ============ */
 const DEMO_SONGS = [['Midnight Drive','Nova Lane'],['Asphalt Glow','Kiro'],['Low Lights','Marlo & The Rain'],['Redline','Vex Motor'],
   ['Slow Burn','Ayla Moon'],['Neon Pulse','Drift Unit'],['Cold Start','Hale'],['Open Road','The Quiet Engines'],['Gasoline Hearts','Juno Park'],['After Hours','Sable']];
-async function demoApi(method, path){
+async function demoApi(method, path, body){
   await sleep(150);
   const tracks = DEMO_SONGS.map(([n,a],i) => ({ type:'track', uri:'spotify:track:demo'+i, name:n, artists:[{name:a}],
     album:{ name:'Demo Sessions', release_date:'202'+(i%6)+'-01-01', images:[] }, duration_ms:165000 + i*9000 }));
   if(path === '/me') return { id:'me' };
+  if(method === 'POST' && path === '/me/playlists') return { id:'new' + Date.now(), name:body.name };
   if(path.startsWith('/me/playlists')) return { items:[
     { id:'p1', name:'Autofahrt', images:[], owner:{id:'me'}, items:{total:10} },
     { id:'p2', name:'Gym', images:[], owner:{id:'me'}, items:{total:42} },
